@@ -4,6 +4,8 @@ Stellaris Error Log Inspector
 A tool for reading Stellaris error.log and estimating which mod files/mods are most likely related to reported errors.
 ![Error Log Inspector screenshot](screenshot.png)
 
+Windows 10/11 users can download the EXE here: 
+https://github.com/non-npc/Stellaris-Error-Log-Inspector/releases/tag/v1.0
 
 Install
 -------
