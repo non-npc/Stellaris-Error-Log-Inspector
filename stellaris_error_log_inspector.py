@@ -41,7 +41,7 @@ from PyQt6.QtWidgets import (
 )
 
 APP_NAME = "Stellaris Error Log Inspector"
-APP_VERSION = "1.3"
+APP_VERSION = "1.4"
 
 COMMON_RELATIVE_ROOTS = (
     "common/",
@@ -59,12 +59,17 @@ COMMON_RELATIVE_ROOTS = (
 )
 
 ERROR_PATTERNS = [
-    ("Syntax / Unexpected token", re.compile(r"Unexpected token", re.I)),
-    ("Invalid scope/context", re.compile(r"Invalid context switch|invalid scope|Scope:", re.I)),
-    ("Missing asset/reference", re.compile(r"Could not find|not found|Missing|Failed to find|Unable to find", re.I)),
-    ("Unknown key/modifier/effect", re.compile(r"Unknown|Invalid .*modifier|Invalid .*effect|Invalid .*trigger", re.I)),
-    ("Localization", re.compile(r"locali[sz]ation|missing key|invalid key", re.I)),
-    ("Duplicate/conflict", re.compile(r"duplicate|already exists|overriding", re.I)),
+    # Specific, high-signal categories first. These beat generic "Invalid" / "Error" matches.
+    ("Version / descriptor issue", re.compile(r"supported_version|remote_file_id|descriptor|\.mod(?:\s|$)|mod/ugc_\d+\.mod", re.I)),
+    ("Component issue", re.compile(r"component template|component set|component slot|component_tag|ship design.*(?:component|slot|set)|invalid component", re.I)),
+    ("Ship design issue", re.compile(r"ship design|design \"|section template|ship_size|fleet_slot_size", re.I)),
+    ("Technology issue", re.compile(r"technology|tech_[A-Za-z0-9_]+|invalid tech|research", re.I)),
+    ("Localisation", re.compile(r"locali[sz]ation|missing key|invalid key|yml|l_[a-z_]+\.yml", re.I)),
+    ("Syntax / Unexpected token", re.compile(r"Unexpected token|Unexpected end|Expected token|Parser error", re.I)),
+    ("Invalid scope/context", re.compile(r"Invalid context switch|invalid scope|Scope:|wrong scope|event target", re.I)),
+    ("Missing asset/reference", re.compile(r"Could not find|not found|Missing|Failed to find|Unable to find|could not open|texture|sprite|dds|mesh|asset", re.I)),
+    ("Unknown key/modifier/effect", re.compile(r"Unknown|Invalid .*modifier|Invalid .*effect|Invalid .*trigger|Invalid .*key|Invalid .*value", re.I)),
+    ("Duplicate/conflict", re.compile(r"duplicate|already exists|overriding|redefined|conflict", re.I)),
     ("Script error", re.compile(r"Script Error|Error:", re.I)),
 ]
 
@@ -147,8 +152,8 @@ def extract_file_and_line(line: str) -> Tuple[str, str]:
         r'file:\s*"([^"]+)"',
         r'File:\s*"([^"]+)"',
         r'file:\s*([^,\s]+)',
+        r'((?:mod|common|events|locali[sz]ation|interface|gfx|sound|music|map|prescripted_countries|dlc)[\\/][^\"]+?\.(?:txt|gui|gfx|asset|yml|mod|dds|ogg|wav))',
         r'([A-Za-z]:[\\/][^\"]+?\.(?:txt|gui|gfx|asset|yml|mod|dds|ogg|wav))',
-        r'((?:common|events|locali[sz]ation|interface|gfx|sound|music|map|prescripted_countries)[\\/][^\"]+?\.(?:txt|gui|gfx|asset|yml|dds|ogg|wav))',
     ]
     for pat in patterns:
         m = re.search(pat, line, re.I)
@@ -177,7 +182,25 @@ def extract_relative_path(file_path: str) -> str:
     return cleaned
 
 
+def extract_workshop_id(*values: str) -> str:
+    """Return a Steam Workshop ID found in common Stellaris log path formats."""
+    joined = " ".join(v for v in values if v)
+    norm = normalize_slashes(joined).lower()
+    patterns = [
+        r"mod/ugc_(\d+)\.mod",
+        r"ugc_(\d+)\.mod",
+        r"(?:workshop/content/281990/|steamapps/workshop/content/281990/)(\d+)",
+        r"remote_file_id\s*=\s*\"?(\d+)\"?",
+    ]
+    for pat in patterns:
+        m = re.search(pat, norm, re.I)
+        if m:
+            return m.group(1)
+    return ""
+
+
 def classify_error(line: str) -> str:
+    # Use the descriptive text in the log line whenever possible.
     for label, pattern in ERROR_PATTERNS:
         if pattern.search(line):
             return label
@@ -185,20 +208,29 @@ def classify_error(line: str) -> str:
 
 
 def severity_for(error_type: str, line: str) -> str:
-    if error_type in {"Syntax / Unexpected token", "Invalid scope/context"}:
+    if error_type in {"Syntax / Unexpected token", "Invalid scope/context", "Component issue"}:
         return "High"
-    if error_type in {"Unknown key/modifier/effect", "Missing asset/reference"}:
+    if error_type in {"Version / descriptor issue", "Unknown key/modifier/effect", "Missing asset/reference", "Ship design issue", "Technology issue"}:
         return "Medium"
     if "warning" in line.lower():
         return "Low"
     return "Medium"
 
 
-def map_error_to_mod(file_path: str, relative_path: str, mods: List[ModInfo]) -> Tuple[str, str]:
-    if not file_path and not relative_path:
+def map_error_to_mod(file_path: str, relative_path: str, mods: List[ModInfo], raw_line: str = "") -> Tuple[str, str]:
+    if not file_path and not relative_path and not raw_line:
         return "Base game / unknown", ""
     norm_file = normalize_slashes(file_path).lower()
     rel = normalize_slashes(relative_path).lower()
+
+    # Direct mod descriptor reference, e.g. mod/ugc_1199002146.mod.
+    wid = extract_workshop_id(file_path, relative_path, raw_line)
+    if wid:
+        for mod in mods:
+            descriptor_id = extract_workshop_id(str(mod.descriptor_path))
+            if mod.remote_file_id == wid or descriptor_id == wid:
+                return f"{mod.name} (Workshop ID {wid})", str(mod.content_path or mod.descriptor_path)
+        return f"Workshop item {wid}", ""
 
     # Direct path containment.
     for mod in mods:
@@ -244,7 +276,7 @@ def parse_error_log(error_log: Path, mods: List[ModInfo]) -> List[ParsedError]:
         rel = extract_relative_path(file_path)
         etype = classify_error(raw)
         sev = severity_for(etype, raw)
-        mod_name, mod_path = map_error_to_mod(file_path, rel, mods)
+        mod_name, mod_path = map_error_to_mod(file_path, rel, mods, raw)
         results.append(ParsedError(sev, etype, raw.strip(), file_path, rel, line_no, mod_name, mod_path))
     return results
 
