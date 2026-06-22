@@ -41,7 +41,7 @@ from PyQt6.QtWidgets import (
 )
 
 APP_NAME = "Stellaris Error Log Inspector"
-APP_VERSION = "1.4"
+APP_VERSION = "1.6"
 
 COMMON_RELATIVE_ROOTS = (
     "common/",
@@ -60,6 +60,7 @@ COMMON_RELATIVE_ROOTS = (
 
 ERROR_PATTERNS = [
     # Specific, high-signal categories first. These beat generic "Invalid" / "Error" matches.
+    ("Custom empire design issue", re.compile(r"user_empire_designs(?:_v[\d.]+)?\.txt|galaxy_configuration_command|Invalid government civic|invalid trait|bad savegame|empire_flag.*could not find.*flags/", re.I)),
     ("Version / descriptor issue", re.compile(r"supported_version|remote_file_id|descriptor|\.mod(?:\s|$)|mod/ugc_\d+\.mod", re.I)),
     ("Component issue", re.compile(r"component template|component set|component slot|component_tag|ship design.*(?:component|slot|set)|invalid component", re.I)),
     ("Ship design issue", re.compile(r"ship design|design \"|section template|ship_size|fleet_slot_size", re.I)),
@@ -201,6 +202,13 @@ def extract_workshop_id(*values: str) -> str:
 
 def classify_error(line: str) -> str:
     # Use the descriptive text in the log line whenever possible.
+    # Custom empire files are a special case: stale saved empires can reference
+    # removed traits/civics/flag textures even when the supplying mod is inactive.
+    low = line.lower()
+    if ("user_empire_designs" in low and ("invalid trait" in low or "invalid government civic" in low or "could not find" in low or "flags/" in low)):
+        return "Custom empire design issue"
+    if ("galaxy_configuration_command" in low and "flags/" in low and "could not find" in low):
+        return "Custom empire design issue"
     for label, pattern in ERROR_PATTERNS:
         if pattern.search(line):
             return label
@@ -208,6 +216,8 @@ def classify_error(line: str) -> str:
 
 
 def severity_for(error_type: str, line: str) -> str:
+    if error_type == "Custom empire design issue":
+        return "Low"
     if error_type in {"Syntax / Unexpected token", "Invalid scope/context", "Component issue"}:
         return "High"
     if error_type in {"Version / descriptor issue", "Unknown key/modifier/effect", "Missing asset/reference", "Ship design issue", "Technology issue"}:
@@ -222,6 +232,14 @@ def map_error_to_mod(file_path: str, relative_path: str, mods: List[ModInfo], ra
         return "Base game / unknown", ""
     norm_file = normalize_slashes(file_path).lower()
     rel = normalize_slashes(relative_path).lower()
+    raw_low = raw_line.lower()
+
+    # user_empire_designs errors usually come from stale custom empire templates.
+    # These may reference traits/civics/flag assets from disabled or outdated mods.
+    if ("user_empire_designs" in raw_low or "galaxy_configuration_command" in raw_low) and (
+        "invalid trait" in raw_low or "invalid government civic" in raw_low or "flags/" in raw_low or "bad savegame" in raw_low
+    ):
+        return "NA ~ Possible empire design issue", "user_empire_designs"
 
     # Direct mod descriptor reference, e.g. mod/ugc_1199002146.mod.
     wid = extract_workshop_id(file_path, relative_path, raw_line)
@@ -584,7 +602,7 @@ class MainWindow(QMainWindow):
             if type_bits:
                 lines.append(f"  Types: {type_bits}")
         lines.append("")
-        lines.append("Interpretation note: this tool identifies the file/mod most directly referenced by the log. Some errors are indirect conflicts caused by load order or overwritten vanilla files.")
+        lines.append("Interpretation note: this tool identifies the file/mod most directly referenced by the log. Some errors are indirect conflicts caused by load order or overwritten vanilla files.\n Custom empire design errors are intentionally shown as `NA ~ Possible empire design issue` because they often come from saved empire templates referencing disabled, removed, or outdated mod content.")
         return "\n".join(lines)
 
     def populate_summary(self, error_log: Path, mod_dir: Path):
